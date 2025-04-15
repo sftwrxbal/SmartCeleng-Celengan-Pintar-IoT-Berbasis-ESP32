@@ -1,0 +1,177 @@
+#define S2 2        
+#define S3 15       
+#define sensorOut 4 
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <EEPROM.h>       
+#include <WiFiManager.h>  
+
+#define SCREEN_WIDTH 128  
+#define SCREEN_HEIGHT 64  
+
+#define OLED_RESET -1        
+#define SCREEN_ADDRESS 0x3C 
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+#define EEPROM_SIZE 512  
+#define RESET_BUTTON 5   
+
+#define BOT_TOKEN "6527652038:AAEy5hAaSS72aX-NnJnYdQBFqp_9wtkX6QQ"
+
+WiFiClientSecure secured_client;
+UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+
+/* Variabel */
+int Red = 0;
+int Green = 0;
+int Blue = 0;
+int Uang = 0;
+int lastUang = -1;   
+String chatID = "";  
+
+// Inisialisasi
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(S2, OUTPUT);
+  pinMode(S3, OUTPUT);
+  pinMode(sensorOut, INPUT);
+  pinMode(RESET_BUTTON, INPUT_PULLUP);
+
+  EEPROM.begin(EEPROM_SIZE);
+  Uang = EEPROM.read(0);  
+
+  // OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    while (true);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 10);
+  display.println("Menghubungkan WiFi...");
+  display.display();
+
+  // WiFi Manager
+  WiFiManager wm;
+  wm.autoConnect("UangDetectorAP");
+
+  secured_client.setInsecure(); // Telegram SSL
+
+  display.clearDisplay();
+  display.setCursor(0, 10);
+  display.println("Siap mendeteksi uang");
+  display.display();
+}
+
+// Fungsi pembacaan warna
+int getColorFrequency(bool s2, bool s3) {
+  digitalWrite(S2, s2);
+  digitalWrite(S3, s3);
+  delay(50);
+  return pulseIn(sensorOut, LOW);
+}
+
+void readColor() {
+  Red = getColorFrequency(LOW, LOW);
+  Green = getColorFrequency(HIGH, HIGH);
+  Blue = getColorFrequency(LOW, HIGH);
+
+  Serial.print("R: "); Serial.print(Red);
+  Serial.print(" G: "); Serial.print(Green);
+  Serial.print(" B: "); Serial.println(Blue);
+}
+
+// Fungsi deteksi nilai uang berdasarkan warna
+int detectUang() {
+  readColor();
+
+  // Kalibrasi berdasarkan percobaan manual
+  if (Red > 200 && Green < 180 && Blue < 180) {
+    return 1000;     // Warna dominan merah (misal Rp1000)
+  } else if (Red > 250 && Green > 250 && Blue < 150) {
+    return 2000;     // Putih kekuningan
+  } else if (Red < 150 && Green > 200 && Blue < 150) {
+    return 5000;     // Hijau dominan
+  } else if (Red > 220 && Green > 150 && Blue > 150) {
+    return 10000;    // Merah muda
+  } else if (Red > 150 && Green > 150 && Blue > 250) {
+    return 20000;    // Biru muda
+  } else if (Red > 250 && Green < 150 && Blue > 200) {
+    return 50000;    // Ungu
+  } else if (Red > 250 && Green > 200 && Blue > 200) {
+    return 100000;   // Putih pucat (agak pink/merah muda)
+  }
+
+  return 0;  // Tidak dikenali
+}
+
+// Menampilkan di OLED
+void tampilkanOLED(int nilai) {
+  display.clearDisplay();
+  display.setCursor(0, 10);
+  display.print("Total: Rp ");
+  display.println(nilai);
+  display.display();
+}
+
+// Kirim ke Telegram
+void kirimTelegram(int nilai) {
+  if (chatID != "") {
+    String pesan = "Terdeteksi uang masuk: Rp " + String(nilai) +
+                   "\nTotal saldo: Rp " + String(Uang);
+    bot.sendMessage(chatID, pesan, "");
+  }
+}
+
+void loop() {
+  if (digitalRead(RESET_BUTTON) == LOW) {
+    Serial.println("Reset EEPROM...");
+    EEPROM.write(0, 0);
+    EEPROM.commit();
+    Uang = 0;
+    tampilkanOLED(Uang);
+    delay(1000);
+  }
+
+  int nominal = detectUang();
+  if (nominal > 0 && nominal != lastUang) {
+    Uang += nominal;
+    EEPROM.write(0, Uang);
+    EEPROM.commit();
+
+    tampilkanOLED(Uang);
+    kirimTelegram(nominal);
+    lastUang = nominal;
+
+    delay(3000);  // Hindari duplikasi
+  }
+
+  // Cek pesan dari Telegram
+  int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+  while (numNewMessages) {
+    for (int i = 0; i < numNewMessages; i++) {
+      String msgText = bot.messages[i].text;
+      String senderID = bot.messages[i].chat_id;
+
+      if (msgText == "/start") {
+        bot.sendMessage(senderID, "Bot siap!\nKetik /saldo untuk melihat saldo.", "");
+      } else if (msgText == "/saldo") {
+        bot.sendMessage(senderID, "Saldo saat ini: Rp " + String(Uang), "");
+      }
+
+      chatID = senderID;
+    }
+    numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+  }
+
+  delay(500);
+}
